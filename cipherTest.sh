@@ -1,8 +1,15 @@
 #!/usr/bin/env bash
 
+set -e
+
 control_c() {
 	[ -t 1 ] && echo "\r\e[K"
 	exit 1
+}
+
+debug() {
+	[ "${DEBUG:-0}" -gt 0 ] && printf "\ndebug: $@\n" >&2
+	return 0
 }
 
 trap control_c SIGINT
@@ -38,9 +45,7 @@ MACS=(`gnutls-cli -l | grep MACs: | cut -d' ' -f2- | tr -d ','`)
 KX=(`gnutls-cli -l | grep "^Key exchange algorithms" | cut -d' ' -f 4- | tr -d ','`)
 v2_ciphers=(`openssl ciphers -ssl2 | tr ':' ' '`)
 
-result=""
-for i in ${PROTOS[@]}; do [ -z "$result" ] && result="+VERS-$i" || result="$result:+VERS-$i"; done
-all_protos=$result
+for i in ${PROTOS[@]}; do all_protos="${all_protos:+$all_protos:}+$i"; done
 
 result=""
 for i in ${CIPHERS[@]}; do [ -z "$result" ] && result="+$i" || result="$result:+$i"; done
@@ -63,15 +68,15 @@ for tgt in ${PROTOS[@]}
 do
 	cur=$(( $cur + 1 ))
 	[ -t 1 ] && echo -en "\r\e[KOptimizing... ($cur/$total)"
-	if echo -ne $request | gnutls-cli --insecure --priority NONE:+VERS-$tgt:$all_kx:$all_macs:+COMP-NULL:$all_ciphers -p $PORT $IP > /dev/null 2>&1
+	if echo -ne $request | gnutls-cli --insecure --priority NONE:+$tgt:$all_kx:$all_macs:+COMP-NULL:$all_ciphers -p $PORT $IP > /dev/null 2>&1
 	then
+		debug "proto $tgt is usable"
 		[ -z "$result" ] && result="$tgt" || result="$result $tgt"
 	fi
 done
+
 PROTOS=( $result )
-result=""
-for i in ${PROTOS[@]}; do [ -z "$result" ] && result="+VERS-$i" || result="$result:+VERS-$i"; done
-all_protos=$result
+for i in ${PROTOS[@]}; do all_protos="${all_protos:+$all_protos:}+$i"; done
 
 # Test each cipher promiscuously and remove any that will never work
 result=""
@@ -79,8 +84,9 @@ for cipher in ${CIPHERS[@]}
 do
 	cur=$(( $cur + 1 ))
 	[ -t 1 ] && echo -en "\r\e[KOptimizing... ($cur/$total)"
-	if echo -ne $request | gnutls-cli --insecure --priority NONE:$all_protos:$all_kx:$all_macs:+COMP-NULL:+$cipher -p $PORT $IP > /dev/null 2>&1
+	if echo -ne $request | gnutls-cli --insecure --priority "NONE:$all_protos:$all_kx:$all_macs:+COMP-NULL:+$cipher" -p $PORT $IP > /dev/null 2>&1
 	then
+		debug "cipher $cipher is usable"
 		[ -z "$result" ] && result="$cipher" || result="$result $cipher"
 	fi
 done
@@ -97,6 +103,7 @@ do
 	[ -t 1 ] && echo -en "\r\e[KOptimizing... ($cur/$total)"
 	if echo -ne $request | gnutls-cli --insecure --priority NONE:$all_protos:$all_kx:+$tgt:+COMP-NULL:$all_ciphers -p $PORT $IP > /dev/null 2>&1
 	then
+		debug "MAC $tgt is usable"
 		[ -z "$result" ] && result="$tgt" || result="$result $tgt"
 	fi
 done
@@ -113,6 +120,7 @@ do
 	[ -t 1 ] && echo -en "\r\e[KOptimizing... ($cur/$total)"
 	if echo -ne $request | gnutls-cli --insecure --priority NONE:$all_protos:+$tgt:$all_macs:+COMP-NULL:$all_ciphers -p $PORT $IP > /dev/null 2>&1
 	then
+		debug "KX $tgt is usable"
 		[ -z "$result" ] && result="$tgt" || result="$result $tgt"
 	fi
 done
@@ -146,24 +154,24 @@ done
 for proto in ${PROTOS[@]}
 do
 	[ -t 1 ] && printf '\r\e[K%-7s %-17s %-10s %-11s (%d / %d)' $proto "" "" "" $i $total
-	echo -ne $request | gnutls-cli --insecure --priority NONE:+VERS-$proto:$all_kx:$all_macs:+COMP-NULL:$all_ciphers -p $PORT $IP > /dev/null 2>&1
+	echo -ne $request | gnutls-cli --insecure --priority NONE:+$proto:$all_kx:$all_macs:+COMP-NULL:$all_ciphers -p $PORT $IP > /dev/null 2>&1
 	[ $? -eq 0 ] || { i=$(( $i + ${#KX[@]} * ${#CIPHERS[@]} * ${#MACS[@]} )); continue; }
 
 	for kx in ${KX[@]}
 	do
 		[ -t 1 ] && printf '\r%-7s %-17s %-10s %-11s (%d / %d)' $proto "" "" $kx $i $total
-		echo -ne $request | gnutls-cli --insecure --priority NONE:+VERS-$proto:+$kx:$all_macs:+COMP-NULL:$all_ciphers -p $PORT $IP > /dev/null 2>&1
+		echo -ne $request | gnutls-cli --insecure --priority NONE:+$proto:+$kx:$all_macs:+COMP-NULL:$all_ciphers -p $PORT $IP > /dev/null 2>&1
 		[ $? -eq 0 ] || { i=$(( $i + ${#CIPHERS[@]} * ${#MACS[@]} )); continue; }
 		for cipher in ${CIPHERS[@]}
 		do
 			[ -t 1 ] && printf '\r%-7s %-17s %-10s %-11s (%d / %d)' $proto $cipher "" $kx $i $total
-			echo -ne $request | gnutls-cli --insecure --priority NONE:+VERS-$proto:+$kx:$all_macs:+COMP-NULL:+$cipher -p $PORT $IP > /dev/null 2>&1
+			echo -ne $request | gnutls-cli --insecure --priority NONE:+$proto:+$kx:$all_macs:+COMP-NULL:+$cipher -p $PORT $IP > /dev/null 2>&1
 			[ $? -eq 0 ] || { i=$(( $i + ${#MACS[@]} )); continue; }
 			for mac in ${MACS[@]}
 			do
 				i=$(( $i + 1 ))
 				[ -t 1 ] && printf '\r%-7s %-17s %-10s %-11s (%d / %d)' $proto $cipher $mac $kx $i $total
-				echo -ne $request | gnutls-cli --insecure --priority NONE:+VERS-$proto:+$kx:+$mac:+COMP-NULL:+$cipher -p $PORT $IP > /dev/null 2>&1
+				echo -ne $request | gnutls-cli --insecure --priority NONE:+$proto:+$kx:+$mac:+COMP-NULL:+$cipher -p $PORT $IP > /dev/null 2>&1
 				if [ $? -eq 0 ]
 				then
 					[ -t 1 ] && echo -en "\r\e[K"
