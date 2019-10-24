@@ -8,7 +8,7 @@ control_c() {
 }
 
 debug() {
-	[ "${DEBUG:-0}" -gt 0 ] && printf "\ndebug: $@\n" >&2
+	[ "${DEBUG:-0}" -gt 0 ] && printf "\ndebug: $*\n" >&2
 	return 0
 }
 
@@ -40,27 +40,54 @@ declare -a v2_ciphers
 request='HEAD / HTTP/1.1\r\nHost: '"$HOST"'\r\nConnection: close\r\n\r\n'
 
 CIPHERS=(`gnutls-cli -l | grep Ciphers: | cut -d' ' -f2- | tr -d ','`)
+debug "Our supported ciphers: ${CIPHERS[*]}"
+
 PROTOS=(`gnutls-cli -l | grep Protocols: | cut -d' ' -f2- | tr -d ','`)
+debug "Our supported protocols: ${PROTOS[*]}"
+
 MACS=(`gnutls-cli -l | grep MACs: | cut -d' ' -f2- | tr -d ','`)
+debug "Our supported MACs: ${MACS[*]}"
+
 KX=(`gnutls-cli -l | grep "^Key exchange algorithms" | cut -d' ' -f 4- | tr -d ','`)
+debug "Our supported KX: ${KX[*]}"
+
+if gnutls-cli -l | grep -q '^Elliptic curves'; then
+	CURVES=(`gnutls-cli -l | grep '^Elliptic curves' | cut -d' ' -f 3- | tr -d ','`)
+	debug "Our supported curves: ${CURVES[*]}"
+	all_curves="+CURVE-ALL"
+elif gnutls-cli -l | grep -q '^Groups'; then
+	CURVES=(`gnutls-cli -l | grep '^Groups' | cut -d' ' -f 2- | tr -d ','`)
+	debug "Our supported groups: ${GROUPS[*]}"
+	all_curves="+GROUP-ALL"
+fi
+
+PKSIGS=(`gnutls-cli -l | grep '^PK-signatures:' | cut -d' ' -f 2- | tr -d ','`)
+debug "Our supported signature algorithms: ${PKSIGS[*]}"
+
 v2_ciphers=(`openssl ciphers -ssl2 | tr ':' ' '`)
 
-for i in ${PROTOS[@]}; do all_protos="${all_protos:+$all_protos:}+$i"; done
+# for i in ${PROTOS[@]}; do all_protos="${all_protos:+$all_protos:}+$i"; done
+# for i in ${CIPHERS[@]}; do all_ciphers="${all_ciphers:+$all_ciphers:}+$i"; done
+# for i in ${MACS[@]}; do all_macs="${all_macs:+$all_macs:}+$i"; done
+# for i in ${KX[@]}; do all_kx="${all_kx:+$all_kx:}+$i"; done
+# for i in ${CURVES[@]}; do all_curves="${all_curves:+$all_curves:}+$i"; done
+# for i in ${PKSIGS[@]}; do all_pksigs="${all_pksigs:+$all_pksigs:}+$i"; done
 
-result=""
-for i in ${CIPHERS[@]}; do [ -z "$result" ] && result="+$i" || result="$result:+$i"; done
-all_ciphers=$result
-
-result=""
-for i in ${MACS[@]}; do [ -z "$result" ] && result="+$i" || result="$result:+$i"; done
-all_macs=$result
-
-result=""
-for i in ${KX[@]}; do [ -z "$result" ] && result="+$i" || result="$result:+$i"; done
-all_kx=$result
+all_protos="+VERS-ALL"
+all_ciphers="+CIPHER-ALL"
+all_macs="+MAC-ALL"
+all_kx="+KX-ALL"
+all_pksigs="+SIGN-ALL"
 
 cur=0
-total=$(( ${#CIPHERS[@]} + ${#PROTOS[@]} + ${#MACS[@]} + ${#KX[@]} ))
+total=$(( ${#CIPHERS[@]} + ${#PROTOS[@]} + ${#MACS[@]} + ${#KX[@]} + ${#CURVES[@]} + ${#PKSIGS[@]} ))
+
+if echo -ne $request | gnutls-cli --insecure --priority NONE:+CTYPE-X.509:$all_protos:$all_kx:$all_macs:+COMP-NULL:$all_ciphers:$all_curves:$all_pksigs -p $PORT $IP >/dev/null 2>&1; then
+	true
+else
+	echo -ne $result | gnutls-cli --insecure --priority NONE:$all_protos:$all_kx:$all_macs:+COMP-NULL:$all_ciphers:$all_curves:$all_pksigs -p $PORT $IP
+	exit 1
+fi
 
 # Test each protocol promiscuously and remove any that will never work
 result=""
@@ -68,7 +95,7 @@ for tgt in ${PROTOS[@]}
 do
 	cur=$(( $cur + 1 ))
 	[ -t 1 ] && echo -en "\r\e[KOptimizing... ($cur/$total)"
-	if echo -ne $request | gnutls-cli --insecure --priority NONE:+$tgt:$all_kx:$all_macs:+COMP-NULL:$all_ciphers -p $PORT $IP > /dev/null 2>&1
+	if echo -ne $request | gnutls-cli --insecure --priority NONE:+$tgt:$all_kx:$all_macs:+COMP-NULL:$all_ciphers:$all_curves:$all_pksigs -p $PORT $IP > /dev/null 2>&1
 	then
 		debug "proto $tgt is usable"
 		[ -z "$result" ] && result="$tgt" || result="$result $tgt"
@@ -84,7 +111,7 @@ for cipher in ${CIPHERS[@]}
 do
 	cur=$(( $cur + 1 ))
 	[ -t 1 ] && echo -en "\r\e[KOptimizing... ($cur/$total)"
-	if echo -ne $request | gnutls-cli --insecure --priority "NONE:$all_protos:$all_kx:$all_macs:+COMP-NULL:+$cipher" -p $PORT $IP > /dev/null 2>&1
+	if echo -ne $request | gnutls-cli --insecure --priority "NONE:$all_protos:$all_kx:$all_macs:+COMP-NULL:+$cipher:$all_curves:$all_pksigs" -p $PORT $IP > /dev/null 2>&1
 	then
 		debug "cipher $cipher is usable"
 		[ -z "$result" ] && result="$cipher" || result="$result $cipher"
@@ -101,7 +128,7 @@ for tgt in ${MACS[@]}
 do
 	cur=$(( $cur + 1 ))
 	[ -t 1 ] && echo -en "\r\e[KOptimizing... ($cur/$total)"
-	if echo -ne $request | gnutls-cli --insecure --priority NONE:$all_protos:$all_kx:+$tgt:+COMP-NULL:$all_ciphers -p $PORT $IP > /dev/null 2>&1
+	if echo -ne $request | gnutls-cli --insecure --priority NONE:$all_protos:$all_kx:+$tgt:+COMP-NULL:$all_ciphers:$all_curves:$all_pksigs -p $PORT $IP > /dev/null 2>&1
 	then
 		debug "MAC $tgt is usable"
 		[ -z "$result" ] && result="$tgt" || result="$result $tgt"
@@ -116,9 +143,14 @@ all_macs=$result
 result=""
 for tgt in ${KX[@]}
 do
+	if echo "$tgt" | grep -q PSK; then
+		debug "skipping PSK KX $tgt"
+		continue
+	fi
+
 	cur=$(( $cur + 1 ))
 	[ -t 1 ] && echo -en "\r\e[KOptimizing... ($cur/$total)"
-	if echo -ne $request | gnutls-cli --insecure --priority NONE:$all_protos:+$tgt:$all_macs:+COMP-NULL:$all_ciphers -p $PORT $IP > /dev/null 2>&1
+	if echo -ne $request | gnutls-cli --insecure --priority NONE:$all_protos:+$tgt:$all_macs:+COMP-NULL:$all_ciphers:$all_curves:$all_pksigs -p $PORT $IP > /dev/null 2>&1
 	then
 		debug "KX $tgt is usable"
 		[ -z "$result" ] && result="$tgt" || result="$result $tgt"
@@ -129,11 +161,46 @@ result=""
 for i in ${KX[@]}; do [ -z "$result" ] && result="+$i" || result="$result:+$i"; done
 all_kx=$result
 
-total=$(( ${#PROTOS[@]} * ${#KX[@]} * ${#CIPHERS[@]} * ${#MACS[@]} + ${#v2_ciphers[@]} ))
+# Test each curve promiscuously and remove any that will never work
+result=""
+for tgt in ${CURVES[@]}
+do
+	cur=$(( $cur + 1 ))
+	[ -t 1 ] && echo -en "\r\e[KOptimizing... ($cur/$total)"
+	if echo -ne $request | gnutls-cli --insecure --priority NONE:$all_protos:$all_kx:$all_macs:+COMP-NULL:$all_ciphers:+$tgt:$all_pksigs -p $PORT $IP > /dev/null 2>&1
+	then
+		debug "curve $tgt is usable"
+		result="${result:+$result }$tgt"
+	fi
+done
+CURVES=( $result )
+for i in ${CURVES[@]}; do all_curves="${all_curves:+$all_curves:}+$i"; done
+
+# Test each signature algo promiscuously and remove any that will never work
+result=""
+for tgt in ${PKSIGS[@]}
+do
+	cur=$(( $cur + 1 ))
+	[ -t 1 ] && echo -en "\r\e[KOptimizing... ($cur/$total)"
+	if echo -ne $request | gnutls-cli --insecure --priority NONE:$all_protos:$all_kx:$all_macs:+COMP-NULL:$all_ciphers:$all_curves:+$tgt -p $PORT $IP > /dev/null 2>&1
+	then
+		debug "pksig $tgt is usable"
+		result="${result:+$result }$tgt"
+	fi
+done
+PKSIGS=( $result )
+for i in ${KX[@]}; do all_pksigs="${all_curves:+$all_curves:}+$i"; done
+
+total=$(( ${#PROTOS[@]} * ${#KX[@]} * ${#CIPHERS[@]} * ${#MACS[@]} + ${#CURVES[@]} + ${#PKSIGS[@]} + ${#v2_ciphers[@]} ))
 i=0
 
+if [ "$total" = 0 ]; then
+	echo "Nothing worked! Does \`gnutls-cli --insecure -p $PORT $IP\` work?" >&2
+	exit
+fi
+
 [ -t 1 ] && echo -en '\r\e[K'
-printf '%-7s %-17s %-10s %-11s\n' "Proto" "Cipher" "MAC" "KeX"
+printf '%-11s %-17s %-10s %-11s %-15s %-11s\n' "Proto" "Cipher" "MAC" "KeX" "Curve" "PK-Sig"
 echo "------------------------------------------------"
 for v2_cipher in ${v2_ciphers[@]}
 do
@@ -151,38 +218,26 @@ do
 	fi
 done
 
-for proto in ${PROTOS[@]}
-do
-	[ -t 1 ] && printf '\r\e[K%-7s %-17s %-10s %-11s (%d / %d)' $proto "" "" "" $i $total
-	echo -ne $request | gnutls-cli --insecure --priority NONE:+$proto:$all_kx:$all_macs:+COMP-NULL:$all_ciphers -p $PORT $IP > /dev/null 2>&1
-	[ $? -eq 0 ] || { i=$(( $i + ${#KX[@]} * ${#CIPHERS[@]} * ${#MACS[@]} )); continue; }
-
-	for kx in ${KX[@]}
-	do
-		[ -t 1 ] && printf '\r%-7s %-17s %-10s %-11s (%d / %d)' $proto "" "" $kx $i $total
-		echo -ne $request | gnutls-cli --insecure --priority NONE:+$proto:+$kx:$all_macs:+COMP-NULL:$all_ciphers -p $PORT $IP > /dev/null 2>&1
-		[ $? -eq 0 ] || { i=$(( $i + ${#CIPHERS[@]} * ${#MACS[@]} )); continue; }
-		for cipher in ${CIPHERS[@]}
-		do
-			[ -t 1 ] && printf '\r%-7s %-17s %-10s %-11s (%d / %d)' $proto $cipher "" $kx $i $total
-			echo -ne $request | gnutls-cli --insecure --priority NONE:+$proto:+$kx:$all_macs:+COMP-NULL:+$cipher -p $PORT $IP > /dev/null 2>&1
-			[ $? -eq 0 ] || { i=$(( $i + ${#MACS[@]} )); continue; }
-			for mac in ${MACS[@]}
-			do
-				i=$(( $i + 1 ))
-				[ -t 1 ] && printf '\r%-7s %-17s %-10s %-11s (%d / %d)' $proto $cipher $mac $kx $i $total
-				echo -ne $request | gnutls-cli --insecure --priority NONE:+$proto:+$kx:+$mac:+COMP-NULL:+$cipher -p $PORT $IP > /dev/null 2>&1
-				if [ $? -eq 0 ]
-				then
-					[ -t 1 ] && echo -en "\r\e[K"
-					[ $mac = "MD5" ] && echo -ne '\e[1;31m'
-					[ $cipher = "ARCFOUR-40" ] && echo -ne '\e[1;31m'
-					printf "%-7s %-17s %-10s %-11s\n" $proto $cipher $mac $kx
-					echo -ne '\e[00m'
-				fi
-			done
-		done
-	done
+for pksig in ${PKSIGS[@]}; do
+for curve in ${CURVES[@]}; do
+for proto in ${PROTOS[@]}; do
+for kx in ${KX[@]}; do
+for cipher in ${CIPHERS[@]}; do
+for mac in ${MACS[@]}; do
+	i=$(( $i + 1 ))
+	printf '\r%-11s %-17s %-10s %-11s %-15s %-11s (%d / %d)' $proto $cipher $mac $kx $curve $pksig $i $total
+	if echo -ne $request | gnutls-cli --insecure --priority NONE:+$proto:+$kx:+$mac:+COMP-NULL:+$cipher:+$curve:+$pksig -p $PORT $IP > /dev/null 2>&1; then
+		[ -t 1 ] && echo -en "\r\e[K"
+		[ $mac = "MD5" ] && echo -ne '\e[1;31m'
+		[ $cipher = "ARCFOUR-40" ] && echo -ne '\e[1;31m'
+		printf "%-11s %-17s %-10s %-11s %-15s %-11s\n" $proto $cipher $mac $kx $curve $pksig
+		echo -ne '\e[00m'
+	fi
+done
+done
+done
+done
+done
 done
 
-[ -t 1 ] && printf "\r%80s\r" ""
+printf "\r%80s\r\n" ""
